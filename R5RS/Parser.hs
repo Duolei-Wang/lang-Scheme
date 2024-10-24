@@ -1,11 +1,19 @@
-module R5RS.Parser
-  ( LispVal (Atom, Bool, Number, Quoted, DottedList, String, List),
-    parseExpr,
-  )
-where
+{-# OPTIONS_GHC -Wno-deprecations #-}
+
+module R5RS.Parser where
 
 import Control.Monad (liftM)
+import Control.Monad.Error
+  ( Error,
+    MonadError (throwError),
+    MonadIO (liftIO),
+    noMsg,
+    strMsg,
+  )
+import Control.Monad.Trans.Error (ErrorT)
+import Data.IORef (IORef, newIORef, readIORef)
 import System.Environment (getArgs)
+import Text.Parsec (ParseError)
 import Text.ParserCombinators.Parsec
   ( Parser,
     char,
@@ -79,6 +87,43 @@ parseQuoted = do
   char '\''
   Quoted <$> parseExpr
 
+data LispError
+  = NumArgs Integer [LispVal]
+  | TypeMismatch String LispVal
+  | Parser ParseError
+  | BadSpecialForm String LispVal
+  | NotFunction String String
+  | UnboundVar String String
+  | Default String
+
+type Env = IORef [(String, IORef LispVal)]
+
+nullEnv :: IO Env
+nullEnv = newIORef []
+
+type IOThrowsError = ErrorT LispError IO
+
+getVar :: Env -> String -> IOThrowsError LispVal
+getVar envRef var =
+  do
+    env <- liftIO $ readIORef envRef
+    maybe
+      (throwError $ UnboundVar "Getting an unbound variable" var)
+      (liftIO . readIORef)
+      (lookup var env)
+
+instance Error LispError where
+  noMsg :: LispError
+  noMsg = Default "An error has occurred"
+  strMsg :: String -> LispError
+  strMsg = Default
+
+type ThrowsError = Either LispError
+
+liftThrows :: ThrowsError a -> IOThrowsError a
+liftThrows (Left err) = throwError err
+liftThrows (Right val) = return val
+
 data LispVal
   = Atom String
   | Number Integer
@@ -87,6 +132,13 @@ data LispVal
   | Quoted LispVal
   | List [LispVal]
   | DottedList [LispVal] LispVal
+  | PrimitiveFunc ([LispVal] -> ThrowsError LispVal)
+  | Func
+      { params :: [String],
+        vararg :: Maybe String,
+        body :: [LispVal],
+        closure :: Env
+      }
 
 parseExpr :: Parser LispVal
 parseExpr =
